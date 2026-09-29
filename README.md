@@ -35,6 +35,7 @@ playlist shows real song titles and lengths instead of file names.
 | Volume | drag the VOL slider | `↑` / `↓` |
 | Play a specific track | double-click it in the playlist | |
 | Shuffle / repeat (all → one → off) | SHUF / REP toggles | |
+| Show / hide equalizer and playlist | EQ / PL toggles | |
 
 Pressing previous more than three seconds into a track restarts it instead.
 

@@ -17,7 +17,8 @@ use crate::viz::{BANDS, Spectrum, WINDOW};
 
 pub const WIN_W: f32 = 560.0;
 pub const WIN_H: f32 = 740.0;
-pub const MIN_H: f32 = 330.0;
+/// Compact height: everything but the EQ and playlist panels.
+pub const MIN_H: f32 = 216.0;
 
 const DEFAULT_URL: &str =
     "https://archive.org/download/BillyStrings2026-09-26/BillyStrings2026-09-26_vbr.m3u";
@@ -69,6 +70,9 @@ pub struct App {
     volume: f32,
 
     eq_visible: bool,
+    playlist_visible: bool,
+    /// Window height to restore when the playlist is shown again.
+    full_height: f32,
     eq: EqParams,
     eq_preset: Option<usize>,
 
@@ -126,6 +130,8 @@ impl App {
             repeat: Repeat::Off,
             volume: 0.8,
             eq_visible: true,
+            playlist_visible: true,
+            full_height: WIN_H,
             eq: EqParams::default(),
             eq_preset: Some(0),
             spectrum: Spectrum::default(),
@@ -219,6 +225,24 @@ impl App {
         }
         self.planned_next = None;
         self.spectrum = Spectrum::default();
+    }
+
+    /// Height of everything above the playlist panel.
+    fn fixed_height(&self) -> f32 {
+        let base = 16.0 + 118.0 + 18.0 + 34.0 + 30.0;
+        base + if self.eq_visible { 16.0 + 120.0 } else { 0.0 }
+    }
+
+    /// Resize the window to fit: compact when the playlist is hidden, the
+    /// remembered full height when it is shown.
+    fn fit_window(&self, ctx: &egui::Context) {
+        let width = ctx.viewport_rect().width().max(WIN_W);
+        let height = if self.playlist_visible {
+            self.full_height.max(self.fixed_height() + 120.0)
+        } else {
+            self.fixed_height()
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(width, height)));
     }
 
     /// Keep the engine's queued track in line with what should play next.
@@ -680,6 +704,16 @@ impl App {
         }
         if toggle(ui, "EQ", self.eq_visible).clicked() {
             self.eq_visible = !self.eq_visible;
+            if !self.playlist_visible {
+                self.fit_window(ui.ctx());
+            }
+        }
+        if toggle(ui, "PL", self.playlist_visible).clicked() {
+            if self.playlist_visible {
+                self.full_height = ui.ctx().viewport_rect().height();
+            }
+            self.playlist_visible = !self.playlist_visible;
+            self.fit_window(ui.ctx());
         }
 
         // volume slider on the right
@@ -853,7 +887,9 @@ impl eframe::App for App {
                     self.draw_eq(ui);
                 }
                 self.draw_url_bar(ui);
-                self.draw_playlist(ui);
+                if self.playlist_visible {
+                    self.draw_playlist(ui);
+                }
             });
     }
 }
