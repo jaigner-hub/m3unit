@@ -5,17 +5,18 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Key, Pos2, Rect, Response, Sense, Shape, Stroke,
-    StrokeKind, Ui, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, FontId, Key, Pos2, Rect, Response, RichText, Sense, Shape,
+    Stroke, StrokeKind, Ui, pos2, vec2,
 };
 use url::Url;
 
+use crate::eq::{self, EqParams, MAX_DB, PRESETS};
 use crate::player::{Engine, Status};
 use crate::playlist::{Playlist, fetch, fmt_time};
 use crate::viz::{BANDS, Spectrum, WINDOW};
 
 pub const WIN_W: f32 = 560.0;
-pub const WIN_H: f32 = 600.0;
+pub const WIN_H: f32 = 740.0;
 pub const MIN_H: f32 = 330.0;
 
 const DEFAULT_URL: &str =
@@ -59,10 +60,17 @@ pub struct App {
 
     current: Option<usize>,
     selected: Option<usize>,
+    /// Track index we intend to play after the current one (queued for
+    /// gapless playback). Reset whenever the answer might change.
+    planned_next: Option<usize>,
     scroll_to_current: bool,
     shuffle: bool,
     repeat: Repeat,
     volume: f32,
+
+    eq_visible: bool,
+    eq: EqParams,
+    eq_preset: Option<usize>,
 
     spectrum: Spectrum,
     started: Instant,
@@ -112,10 +120,14 @@ impl App {
             playlist_rx: None,
             current: None,
             selected: None,
+            planned_next: None,
             scroll_to_current: false,
             shuffle: false,
             repeat: Repeat::Off,
             volume: 0.8,
+            eq_visible: true,
+            eq: EqParams::default(),
+            eq_preset: Some(0),
             spectrum: Spectrum::default(),
             started: Instant::now(),
             last_frame: Instant::now(),
@@ -156,6 +168,7 @@ impl App {
                 self.playlist = pl;
                 self.current = None;
                 self.selected = None;
+                self.planned_next = None;
                 self.playlist_rx = None;
             }
             Ok(Err(e)) => {
@@ -179,6 +192,7 @@ impl App {
         engine.load(track.url.clone());
         self.current = Some(idx);
         self.selected = Some(idx);
+        self.planned_next = None;
         self.scroll_to_current = true;
         self.spectrum = Spectrum::default();
         self.status_msg = format!("buffering {}...", track.title);
@@ -203,7 +217,44 @@ impl App {
         if let Some(e) = &self.engine {
             e.stop();
         }
+        self.planned_next = None;
         self.spectrum = Spectrum::default();
+    }
+
+    /// Keep the engine's queued track in line with what should play next.
+    fn maintain_queue(&mut self) {
+        let active = self
+            .engine
+            .as_ref()
+            .is_some_and(|e| matches!(e.status(), Status::Playing | Status::Paused));
+        if !active || self.current.is_none() {
+            return;
+        }
+        if self.planned_next.is_none() {
+            self.planned_next = self.next_index(false);
+        }
+        let want = self.planned_next;
+        let Some(engine) = &self.engine else { return };
+        if engine.queued_token() == want.map(|i| i as u64) {
+            return;
+        }
+        engine.cancel_queued();
+        if let Some(i) = want
+            && let Some(t) = self.playlist.tracks.get(i)
+        {
+            engine.queue_next(t.url.clone(), i as u64);
+        }
+    }
+
+    /// The queued track has taken over inside the audio thread.
+    fn on_switched(&mut self, idx: usize) {
+        self.current = Some(idx);
+        self.selected = Some(idx);
+        self.planned_next = None;
+        self.scroll_to_current = true;
+        if let Some(t) = self.playlist.tracks.get(idx) {
+            self.status_msg = format!("now playing {}", t.title);
+        }
     }
 
     fn next_index(&mut self, manual: bool) -> Option<usize> {
@@ -280,8 +331,10 @@ impl App {
         let mut finished = false;
         let mut err = None;
         let mut playing = false;
+        let mut switched = None;
         let mut sample_rate = 44_100.0;
         if let Some(e) = &self.engine {
+            switched = e.poll_switch();
             finished = e.finished();
             err = e.take_error();
             playing = e.status() == Status::Playing;
@@ -293,9 +346,13 @@ impl App {
         if let Some(err) = err {
             self.status_msg = err;
         }
+        if let Some(idx) = switched {
+            self.on_switched(idx as usize);
+        }
         if finished {
             self.next(false);
         }
+        self.maintain_queue();
 
         if playing {
             let samples = self.engine.as_ref().unwrap().tap.latest(WINDOW);
@@ -607,6 +664,7 @@ impl App {
         };
         if toggle(ui, "SHUF", self.shuffle).clicked() {
             self.shuffle = !self.shuffle;
+            self.planned_next = None;
         }
         let rep_label = match self.repeat {
             Repeat::Off | Repeat::All => "REP",
@@ -618,6 +676,10 @@ impl App {
                 Repeat::All => Repeat::One,
                 Repeat::One => Repeat::Off,
             };
+            self.planned_next = None;
+        }
+        if toggle(ui, "EQ", self.eq_visible).clicked() {
+            self.eq_visible = !self.eq_visible;
         }
 
         // volume slider on the right
@@ -787,10 +849,202 @@ impl eframe::App for App {
                 self.draw_display(ui);
                 self.draw_seek_bar(ui);
                 self.draw_controls(ui);
+                if self.eq_visible {
+                    self.draw_eq(ui);
+                }
                 self.draw_url_bar(ui);
                 self.draw_playlist(ui);
             });
     }
+}
+
+// --------------------------------------------------------------- equalizer
+
+impl App {
+    fn push_eq(&self) {
+        if let Some(e) = &self.engine {
+            e.eq.set(self.eq);
+        }
+    }
+
+    fn draw_eq(&mut self, ui: &mut Ui) {
+        self.draw_title_bar(ui, "EQUALIZER");
+        let w = ui.available_width();
+        let (rect, _) = ui.allocate_exact_size(vec2(w, 120.0), Sense::hover());
+        let p = ui.painter().clone();
+        p.rect_filled(rect, 0.0, pal::BG);
+        let mut changed = false;
+        let mut custom = false;
+
+        // --- row 1: ON, presets, reset ---------------------------------------
+        let y1 = rect.min.y + 6.0;
+        let on_r = Rect::from_min_size(pos2(rect.min.x + 12.0, y1), vec2(36.0, 16.0));
+        let resp = ui.interact(on_r, ui.id().with("eq_on"), Sense::click());
+        bevel(&p, on_r, self.eq.enabled || resp.is_pointer_button_down_on());
+        let led = Rect::from_min_size(on_r.min + vec2(4.0, 5.0), vec2(6.0, 6.0));
+        p.rect_filled(led, 1.0, if self.eq.enabled { pal::GREEN } else { pal::DARK });
+        p.text(
+            on_r.min + vec2(14.0, 8.0),
+            Align2::LEFT_CENTER,
+            "ON",
+            FontId::monospace(9.0),
+            if self.eq.enabled { pal::WHITE } else { pal::TITLE },
+        );
+        if resp.clicked() {
+            self.eq.enabled = !self.eq.enabled;
+            changed = true;
+        }
+
+        let combo_r = Rect::from_min_size(pos2(on_r.max.x + 10.0, y1 - 1.0), vec2(140.0, 18.0));
+        let selected = self.eq_preset.map(|i| PRESETS[i].name).unwrap_or("Custom");
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(combo_r));
+        egui::ComboBox::from_id_salt("eq_preset")
+            .width(140.0)
+            .selected_text(RichText::new(selected).monospace().size(10.0).color(pal::GREEN))
+            .show_ui(&mut child, |ui| {
+                for (i, pr) in PRESETS.iter().enumerate() {
+                    let label = RichText::new(pr.name).monospace().size(10.0);
+                    if ui.selectable_label(self.eq_preset == Some(i), label).clicked() {
+                        self.eq_preset = Some(i);
+                        self.eq.gains_db = pr.gains_db;
+                        changed = true;
+                    }
+                }
+            });
+        p.text(
+            pos2(combo_r.max.x + 8.0, combo_r.center().y),
+            Align2::LEFT_CENTER,
+            "PRESET",
+            FontId::monospace(9.0),
+            pal::TITLE,
+        );
+
+        let reset_r = Rect::from_min_size(pos2(rect.max.x - 12.0 - 46.0, y1), vec2(46.0, 16.0));
+        let resp = ui.interact(reset_r, ui.id().with("eq_reset"), Sense::click());
+        bevel(&p, reset_r, resp.is_pointer_button_down_on());
+        p.text(reset_r.center(), Align2::CENTER_CENTER, "RESET", FontId::monospace(9.0), pal::WHITE);
+        if resp.clicked() {
+            self.eq.gains_db = [0.0; eq::BANDS];
+            self.eq.preamp_db = 0.0;
+            self.eq_preset = Some(0);
+            changed = true;
+        }
+
+        // --- row 2: sliders + response graph ---------------------------------
+        let top = rect.min.y + 30.0;
+        let h = 62.0;
+        let label_y = top + h + 6.0;
+        let small = FontId::monospace(8.0);
+
+        let x_pre = rect.min.x + 26.0;
+        if vslider(ui, "eq_pre", x_pre, top, h, &mut self.eq.preamp_db) {
+            changed = true;
+        }
+        p.text(pos2(x_pre, label_y), Align2::CENTER_TOP, "PRE", small.clone(), pal::TITLE);
+        p.text(pos2(x_pre + 6.0, top - 1.0), Align2::CENTER_BOTTOM, format!("{:+.0}", MAX_DB), small.clone(), pal::LIGHT);
+
+        let x0 = rect.min.x + 70.0;
+        let pitch = 24.0;
+        for b in 0..eq::BANDS {
+            let x = x0 + b as f32 * pitch;
+            if vslider(ui, ("eq_band", b), x, top, h, &mut self.eq.gains_db[b]) {
+                changed = true;
+                custom = true;
+            }
+            p.text(pos2(x, label_y), Align2::CENTER_TOP, eq::LABELS[b], small.clone(), pal::TITLE);
+        }
+
+        let gx0 = x0 + eq::BANDS as f32 * pitch + 6.0;
+        let graph = Rect::from_min_max(pos2(gx0, top), pos2(rect.max.x - 12.0, top + h));
+        let sr = self
+            .engine
+            .as_ref()
+            .map(|e| e.info().sample_rate)
+            .filter(|&s| s > 0)
+            .unwrap_or(44_100) as f32;
+        draw_eq_graph(&p, graph, &self.eq, sr);
+
+        if custom {
+            self.eq_preset = None;
+        }
+        if changed {
+            self.push_eq();
+        }
+    }
+}
+
+/// Vertical dB fader in `-MAX_DB..=MAX_DB`, 0.5 dB steps; double-click to zero.
+fn vslider(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, x: f32, top: f32, h: f32, value: &mut f32) -> bool {
+    let track = Rect::from_min_size(pos2(x - 3.0, top), vec2(6.0, h));
+    let hit = track.expand2(vec2(8.0, 4.0));
+    let resp = ui.interact(hit, ui.id().with(id), Sense::click_and_drag());
+    let p = ui.painter().clone();
+    inset(&p, track, pal::BG_DEEP);
+    let mid = track.center().y;
+    p.line_segment([pos2(track.min.x - 4.0, mid), pos2(track.max.x + 4.0, mid)], Stroke::new(1.0, pal::LIGHT));
+
+    let mut changed = false;
+    if let Some(pos) = resp.interact_pointer_pos()
+        && (resp.dragged() || resp.clicked())
+    {
+        let t = ((pos.y - track.min.y) / track.height()).clamp(0.0, 1.0);
+        let v = ((MAX_DB - t * 2.0 * MAX_DB) * 2.0).round() / 2.0;
+        if (v - *value).abs() > f32::EPSILON {
+            *value = v;
+            changed = true;
+        }
+    }
+    if resp.double_clicked() && *value != 0.0 {
+        *value = 0.0;
+        changed = true;
+    }
+
+    let t = (MAX_DB - *value) / (2.0 * MAX_DB);
+    let ky = track.min.y + t * track.height();
+    let (y0, y1) = if ky < mid { (ky, mid) } else { (mid, ky) };
+    p.rect_filled(
+        Rect::from_min_max(pos2(track.min.x + 1.0, y0), pos2(track.max.x - 1.0, y1)),
+        0.0,
+        pal::GREEN_DIM,
+    );
+    let knob = Rect::from_center_size(pos2(x, ky), vec2(14.0, 7.0));
+    bevel(&p, knob, resp.is_pointer_button_down_on());
+    if resp.hovered() || resp.dragged() {
+        p.text(
+            pos2(x, top - 2.0),
+            Align2::CENTER_BOTTOM,
+            format!("{:+.1}", value),
+            FontId::monospace(8.0),
+            pal::GREEN,
+        );
+    }
+    changed
+}
+
+fn draw_eq_graph(p: &egui::Painter, r: Rect, eq: &EqParams, sample_rate: f32) {
+    inset(p, r, pal::LCD);
+    let inner = r.shrink(1.0);
+    let y_of = |db: f32| inner.center().y - (db / MAX_DB) * (inner.height() / 2.0 - 2.0);
+    for db in [-6.0, 0.0, 6.0] {
+        let c = if db == 0.0 { pal::GREEN_DIM } else { Color32::from_rgb(0, 40, 12) };
+        p.line_segment([pos2(inner.min.x, y_of(db)), pos2(inner.max.x, y_of(db))], Stroke::new(1.0, c));
+    }
+    for f in eq::FREQS {
+        let t = (f / 20.0).log10() / (20_000.0f32 / 20.0).log10();
+        let x = inner.min.x + t * inner.width();
+        p.line_segment([pos2(x, inner.max.y - 3.0), pos2(x, inner.max.y)], Stroke::new(1.0, pal::GREEN_DIM));
+    }
+    let n = 96;
+    let pts: Vec<Pos2> = (0..n)
+        .map(|i| {
+            let t = i as f32 / (n - 1) as f32;
+            let f = 20.0 * 1000f32.powf(t);
+            let db = eq.response_db(f, sample_rate).clamp(-MAX_DB, MAX_DB);
+            pos2(inner.min.x + t * inner.width(), y_of(db))
+        })
+        .collect();
+    let color = if eq.enabled { pal::GREEN } else { pal::GREEN_DIM };
+    p.add(Shape::line(pts, Stroke::new(1.5, color)));
 }
 
 // ------------------------------------------------------------------ helpers
