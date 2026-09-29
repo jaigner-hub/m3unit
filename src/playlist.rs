@@ -214,7 +214,7 @@ fn parse_length(s: &str) -> Option<u32> {
 }
 
 /// archive.org metadata values may be a string or an array of strings.
-fn json_string(v: &serde_json::Value) -> Option<String> {
+pub fn json_string(v: &serde_json::Value) -> Option<String> {
     match v {
         serde_json::Value::String(s) => Some(s.clone()),
         serde_json::Value::Array(a) => a.iter().find_map(json_string),

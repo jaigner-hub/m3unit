@@ -35,9 +35,18 @@ playlist shows real song titles and lengths instead of file names.
 | Volume | drag the VOL slider | `↑` / `↓` |
 | Play a specific track | double-click it in the playlist | |
 | Shuffle / repeat (all → one → off) | SHUF / REP toggles | |
-| Show / hide equalizer and playlist | EQ / PL toggles | |
+| Show / hide equalizer, show browser, playlist | EQ / FIND / PL toggles | |
 
 Pressing previous more than three seconds into a track restarts it instead.
+
+## Finding shows
+
+The FIND toggle opens a browser for archive.org's Live Music Archive. Type an
+artist (or any words from a show title), press Enter or SEARCH, and sort by
+DATE (newest first) or POP (most downloaded). Only shows with MP3 derivatives
+are listed, so every result is streamable. Double-click a show to load its
+playlist and start playing; MORE pages through long result lists. Hover a row
+for the full title. A blank search lists the whole archive.
 
 ## Equalizer
 
@@ -82,4 +91,5 @@ src/player.rs    audio engine: HTTP streaming -> decoder -> output device
 src/playlist.rs  M3U parsing + archive.org metadata enrichment
 src/viz.rs       sample tap and FFT-based spectrum analyser
 src/eq.rs        10-band peaking-biquad equalizer and presets
+src/archive.rs   archive.org Live Music Archive search
 ```

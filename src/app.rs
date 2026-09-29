@@ -10,15 +10,20 @@ use egui::{
 };
 use url::Url;
 
+use crate::archive::{self, SearchPage, Show, Sort};
 use crate::eq::{self, EqParams, MAX_DB, PRESETS};
 use crate::player::{Engine, Status};
 use crate::playlist::{Playlist, fetch, fmt_time};
 use crate::viz::{BANDS, Spectrum, WINDOW};
 
 pub const WIN_W: f32 = 560.0;
-pub const WIN_H: f32 = 740.0;
+pub const WIN_H: f32 = 920.0;
 /// Compact height: everything but the EQ and playlist panels.
 pub const MIN_H: f32 = 216.0;
+
+const DEFAULT_SEARCH: &str = "Billy Strings";
+const EQ_PANEL_H: f32 = 16.0 + 120.0;
+const FIND_PANEL_H: f32 = 16.0 + 24.0 + 130.0 + 18.0;
 
 const DEFAULT_URL: &str =
     "https://archive.org/download/BillyStrings2026-09-26/BillyStrings2026-09-26_vbr.m3u";
@@ -70,11 +75,23 @@ pub struct App {
     volume: f32,
 
     eq_visible: bool,
+    find_visible: bool,
     playlist_visible: bool,
     /// Window height to restore when the playlist is shown again.
     full_height: f32,
     eq: EqParams,
     eq_preset: Option<usize>,
+
+    // archive.org browser
+    search_input: String,
+    search_sort: Sort,
+    search_rx: Option<mpsc::Receiver<anyhow::Result<SearchPage>>>,
+    shows: Vec<Show>,
+    shows_total: usize,
+    shows_page: usize,
+    show_selected: Option<usize>,
+    autoplay_on_load: bool,
+    search_msg: String,
 
     spectrum: Spectrum,
     started: Instant,
@@ -130,10 +147,20 @@ impl App {
             repeat: Repeat::Off,
             volume: 0.8,
             eq_visible: true,
+            find_visible: true,
             playlist_visible: true,
             full_height: WIN_H,
             eq: EqParams::default(),
             eq_preset: Some(0),
+            search_input: DEFAULT_SEARCH.to_string(),
+            search_sort: Sort::Date,
+            search_rx: None,
+            shows: Vec::new(),
+            shows_total: 0,
+            shows_page: 0,
+            show_selected: None,
+            autoplay_on_load: false,
+            search_msg: String::new(),
             spectrum: Spectrum::default(),
             started: Instant::now(),
             last_frame: Instant::now(),
@@ -142,7 +169,60 @@ impl App {
             rng: seed | 1,
         };
         app.load_playlist();
+        app.search(0);
         app
+    }
+
+    // ------------------------------------------------------- archive search
+
+    fn search(&mut self, page: usize) {
+        let (tx, rx) = mpsc::channel();
+        let client = self.client.clone();
+        let text = self.search_input.clone();
+        let sort = self.search_sort;
+        self.rt.spawn(async move {
+            let _ = tx.send(archive::search(&client, &text, sort, page).await);
+        });
+        self.search_rx = Some(rx);
+        self.search_msg = if page == 0 { "searching...".into() } else { "loading more...".into() };
+        if page == 0 {
+            self.shows.clear();
+            self.shows_total = 0;
+            self.show_selected = None;
+        }
+    }
+
+    fn poll_search(&mut self) {
+        let Some(rx) = &self.search_rx else { return };
+        match rx.try_recv() {
+            Ok(Ok(page)) => {
+                self.shows_total = page.total;
+                self.shows_page = page.page;
+                self.shows.extend(page.shows);
+                self.search_msg = if self.shows.is_empty() {
+                    "no shows found".into()
+                } else {
+                    String::new()
+                };
+                self.search_rx = None;
+            }
+            Ok(Err(e)) => {
+                self.search_msg = format!("search error: {e:#}");
+                self.search_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.search_msg = "search aborted".into();
+                self.search_rx = None;
+            }
+        }
+    }
+
+    fn open_show(&mut self, idx: usize) {
+        let Some(show) = self.shows.get(idx) else { return };
+        self.url_input = show.m3u_url().to_string();
+        self.autoplay_on_load = true;
+        self.load_playlist();
     }
 
     // ---------------------------------------------------------------- state
@@ -176,10 +256,14 @@ impl App {
                 self.selected = None;
                 self.planned_next = None;
                 self.playlist_rx = None;
+                if std::mem::take(&mut self.autoplay_on_load) {
+                    self.play_index(0);
+                }
             }
             Ok(Err(e)) => {
                 self.status_msg = format!("playlist error: {e:#}");
                 self.playlist_rx = None;
+                self.autoplay_on_load = false;
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -230,7 +314,20 @@ impl App {
     /// Height of everything above the playlist panel.
     fn fixed_height(&self) -> f32 {
         let base = 16.0 + 118.0 + 18.0 + 34.0 + 30.0;
-        base + if self.eq_visible { 16.0 + 120.0 } else { 0.0 }
+        base + if self.eq_visible { EQ_PANEL_H } else { 0.0 } + if self.find_visible { FIND_PANEL_H } else { 0.0 }
+    }
+
+    /// A panel above the playlist was shown or hidden: grow or shrink the
+    /// window by its height so the playlist keeps its size.
+    fn panel_toggled(&mut self, ctx: &egui::Context, panel_h: f32, shown: bool) {
+        if self.playlist_visible {
+            let cur = ctx.viewport_rect().size();
+            let h = if shown { cur.y + panel_h } else { (cur.y - panel_h).max(self.fixed_height() + 120.0) };
+            self.full_height = h;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(cur.x.max(WIN_W), h)));
+        } else {
+            self.fit_window(ctx);
+        }
     }
 
     /// Resize the window to fit: compact when the playlist is hidden, the
@@ -351,6 +448,7 @@ impl App {
         self.last_frame = now;
 
         self.poll_playlist();
+        self.poll_search();
 
         let mut finished = false;
         let mut err = None;
@@ -704,9 +802,11 @@ impl App {
         }
         if toggle(ui, "EQ", self.eq_visible).clicked() {
             self.eq_visible = !self.eq_visible;
-            if !self.playlist_visible {
-                self.fit_window(ui.ctx());
-            }
+            self.panel_toggled(ui.ctx(), EQ_PANEL_H, self.eq_visible);
+        }
+        if toggle(ui, "FIND", self.find_visible).clicked() {
+            self.find_visible = !self.find_visible;
+            self.panel_toggled(ui.ctx(), FIND_PANEL_H, self.find_visible);
         }
         if toggle(ui, "PL", self.playlist_visible).clicked() {
             if self.playlist_visible {
@@ -887,10 +987,157 @@ impl eframe::App for App {
                     self.draw_eq(ui);
                 }
                 self.draw_url_bar(ui);
+                if self.find_visible {
+                    self.draw_browser(ui);
+                }
                 if self.playlist_visible {
                     self.draw_playlist(ui);
                 }
             });
+    }
+}
+
+// ------------------------------------------------------------ show browser
+
+impl App {
+    fn draw_browser(&mut self, ui: &mut Ui) {
+        self.draw_title_bar(ui, "ARCHIVE.ORG LIVE MUSIC");
+        let w = ui.available_width();
+
+        // --- search row ------------------------------------------------------
+        let (row, _) = ui.allocate_exact_size(vec2(w, 24.0), Sense::hover());
+        let p = ui.painter().clone();
+        p.rect_filled(row, 0.0, pal::BG);
+        let inner = Rect::from_min_max(row.min + vec2(12.0, 3.0), row.max - vec2(12.0, 3.0));
+        let btn_w = 52.0;
+        let sort_w = 40.0;
+        let field = Rect::from_min_max(inner.min, pos2(inner.max.x - btn_w - 6.0 - sort_w * 2.0 - 10.0, inner.max.y));
+        inset(&p, field, pal::LCD);
+        let mut go = false;
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(field.shrink2(vec2(4.0, 1.0))));
+        let edit = child.add_sized(
+            child.available_size(),
+            egui::TextEdit::singleline(&mut self.search_input)
+                .font(FontId::monospace(11.0))
+                .text_color(pal::GREEN)
+                .background_color(pal::LCD)
+                .hint_text("artist or show (blank = everything)")
+                .frame(egui::Frame::NONE),
+        );
+        if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            go = true;
+        }
+        let mut x = field.max.x + 6.0;
+        let search_r = Rect::from_min_size(pos2(x, inner.min.y), vec2(btn_w, inner.height()));
+        let resp = ui.interact(search_r, ui.id().with("find_go"), Sense::click());
+        bevel(&p, search_r, resp.is_pointer_button_down_on());
+        p.text(search_r.center(), Align2::CENTER_CENTER, "SEARCH", FontId::monospace(9.0), pal::WHITE);
+        if resp.clicked() {
+            go = true;
+        }
+        x += btn_w + 10.0;
+        for (label, sort) in [("DATE", Sort::Date), ("POP", Sort::Popular)] {
+            let r = Rect::from_min_size(pos2(x, inner.min.y + 1.0), vec2(sort_w, inner.height() - 2.0));
+            let on = self.search_sort == sort;
+            let resp = ui.interact(r, ui.id().with(("find_sort", label)), Sense::click());
+            bevel(&p, r, on || resp.is_pointer_button_down_on());
+            p.text(r.center(), Align2::CENTER_CENTER, label, FontId::monospace(9.0), if on { pal::WHITE } else { pal::TITLE });
+            if resp.clicked() && !on {
+                self.search_sort = sort;
+                go = true;
+            }
+            x += sort_w;
+        }
+        if go {
+            self.search(0);
+        }
+
+        // --- results ---------------------------------------------------------
+        let (outer, _) = ui.allocate_exact_size(vec2(w, 130.0), Sense::hover());
+        ui.painter().rect_filled(outer, 0.0, pal::BG);
+        let list = Rect::from_min_max(outer.min + vec2(10.0, 2.0), outer.max - vec2(10.0, 2.0));
+        inset(ui.painter(), list, pal::LCD);
+        let inner = list.shrink(2.0);
+        let mut open = None;
+        let show_creator = self.search_input.trim().is_empty();
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
+        child.set_clip_rect(inner);
+        egui::ScrollArea::vertical()
+            .id_salt("find_list")
+            .auto_shrink([false, false])
+            .show(&mut child, |ui| {
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                let row_h = 15.0;
+                let font = FontId::monospace(11.0);
+                let width = ui.available_width();
+                if self.shows.is_empty() {
+                    ui.add_space(6.0);
+                    let msg = if self.search_msg.is_empty() { "(no results)" } else { self.search_msg.as_str() };
+                    ui.painter().text(ui.cursor().min + vec2(6.0, 0.0), Align2::LEFT_TOP, msg, font.clone(), pal::GREEN_DIM);
+                    return;
+                }
+                for (i, show) in self.shows.iter().enumerate() {
+                    let (r, resp) = ui.allocate_exact_size(vec2(width, row_h), Sense::click());
+                    let is_sel = self.show_selected == Some(i);
+                    if is_sel {
+                        ui.painter().rect_filled(r, 0.0, pal::SEL);
+                    }
+                    let color = if is_sel { pal::WHITE } else { pal::GREEN };
+                    let right = match show.rating {
+                        Some(rt) if rt > 0.0 => format!("{rt:.1}*"),
+                        _ => String::new(),
+                    };
+                    let right_galley = ui.painter().layout_no_wrap(right, FontId::monospace(9.0), pal::GREEN_DIM);
+                    let right_w = right_galley.size().x;
+                    let label_w = (width - right_w - 12.0).max(20.0);
+                    let galley = ui.painter().layout(show.line(show_creator), font.clone(), color, label_w);
+                    let text_rect = Rect::from_min_size(r.min + vec2(4.0, 1.0), vec2(label_w, row_h));
+                    ui.painter().with_clip_rect(text_rect).galley(text_rect.min, galley, color);
+                    ui.painter().galley(pos2(r.max.x - 4.0 - right_w, r.min.y + 2.0), right_galley, pal::GREEN_DIM);
+                    if resp.clicked() {
+                        self.show_selected = Some(i);
+                    }
+                    if resp.double_clicked() {
+                        open = Some(i);
+                    }
+                    if resp.hovered() && !show.title.is_empty() {
+                        resp.on_hover_text(RichText::new(&show.title).monospace().size(10.0));
+                    }
+                }
+            });
+        if let Some(i) = open {
+            self.open_show(i);
+        }
+
+        // --- footer ----------------------------------------------------------
+        let (foot, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
+        let p = ui.painter().clone();
+        p.rect_filled(foot, 0.0, pal::BG_DEEP);
+        let left = if !self.search_msg.is_empty() && !self.shows.is_empty() {
+            self.search_msg.clone()
+        } else if self.shows_total > 0 {
+            format!("{} of {} shows", self.shows.len(), self.shows_total)
+        } else {
+            String::new()
+        };
+        p.text(foot.min + vec2(12.0, 9.0), Align2::LEFT_CENTER, left, FontId::monospace(9.0), pal::TITLE);
+        let more_possible = self.shows.len() < self.shows_total && self.search_rx.is_none();
+        let more_r = Rect::from_min_size(pos2(foot.center().x - 24.0, foot.min.y + 2.0), vec2(48.0, 14.0));
+        if more_possible {
+            let resp = ui.interact(more_r, ui.id().with("find_more"), Sense::click());
+            bevel(&p, more_r, resp.is_pointer_button_down_on());
+            p.text(more_r.center(), Align2::CENTER_CENTER, "MORE", FontId::monospace(9.0), pal::WHITE);
+            if resp.clicked() {
+                self.search(self.shows_page + 1);
+            }
+        }
+        p.text(
+            pos2(foot.max.x - 12.0, foot.min.y + 9.0),
+            Align2::RIGHT_CENTER,
+            "double-click a show to play it",
+            FontId::monospace(9.0),
+            pal::LIGHT,
+        );
     }
 }
 
