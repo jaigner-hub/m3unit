@@ -30,6 +30,9 @@ search thousands of live shows and start playing one with a double-click.
   shortcuts for every transport control.
 - **Collapsible panels.** Hide the equalizer, the show browser or the
   playlist and the window shrinks to fit.
+- **Skinned window.** No OS title bar: the app draws its own with minimize,
+  maximize and close buttons. Drag the title bar to move the window,
+  double-click it to maximize, and resize from the right or bottom edge.
 
 Built in Rust with [egui](https://github.com/emilk/egui) for the window,
 [rodio](https://github.com/RustAudio/rodio) (symphonia) for decoding, and
@@ -69,6 +72,7 @@ the box and hit **GO**, or use the show browser below it.
 | Play a specific track | double-click it in the playlist | |
 | Shuffle / repeat (all → one → off) | SHUF / REP toggles | |
 | Show / hide equalizer, show browser, playlist | EQ / FIND / PL toggles | |
+| Move / maximize / resize window | drag title bar / double-click it / drag right or bottom edge | |
 
 Pressing previous more than three seconds into a track restarts it instead.
 

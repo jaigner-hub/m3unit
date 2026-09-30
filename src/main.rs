@@ -25,7 +25,9 @@ fn main() -> eframe::Result {
             .with_title("M3UNIT")
             .with_inner_size([app::WIN_W, app::WIN_H])
             .with_min_inner_size([app::WIN_W, app::MIN_H])
-            .with_resizable(true),
+            .with_resizable(true)
+            // No OS title bar: the skin draws its own (see App::draw_window_title_bar).
+            .with_decorations(false),
         ..Default::default()
     };
 

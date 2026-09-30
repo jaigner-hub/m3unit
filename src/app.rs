@@ -5,9 +5,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use egui::{
-    Align, Align2, Color32, CornerRadius, FontId, Key, Pos2, Rect, Response, RichText, Sense, Shape,
-    Stroke, StrokeKind, Ui, pos2, vec2,
+    Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Key, PointerButton, Pos2, Rect, Response,
+    RichText, Sense, Shape, Stroke, StrokeKind, Ui, ViewportCommand, pos2, vec2,
 };
+use egui::viewport::ResizeDirection;
 use url::Url;
 
 use crate::archive::{self, SearchPage, Show, Sort};
@@ -547,29 +548,103 @@ impl App {
 
     // ------------------------------------------------------------- drawing
 
+    /// Section header: a hatched bar with a centred label.
     fn draw_title_bar(&self, ui: &mut Ui, label: &str) {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
-        let p = ui.painter();
-        p.rect_filled(rect, 0.0, pal::BG_DEEP);
-        let galley = p.layout_no_wrap(label.to_string(), FontId::monospace(10.0), pal::TITLE);
-        let text_w = galley.size().x + 16.0;
-        let cx = rect.center().x;
-        // hatched grip lines on both sides of the label
-        for side in [-1.0f32, 1.0] {
-            let (x0, x1) = if side < 0.0 {
-                (rect.left() + 6.0, cx - text_w / 2.0)
-            } else {
-                (cx + text_w / 2.0, rect.right() - 6.0)
-            };
-            if x1 > x0 {
-                for k in 0..3 {
-                    let y = rect.top() + 4.0 + k as f32 * 3.0;
-                    p.line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.0, pal::LIGHT));
-                    p.line_segment([pos2(x0, y + 1.0), pos2(x1, y + 1.0)], Stroke::new(1.0, pal::DARK));
-                }
-            }
+        paint_title_bar(ui.painter(), rect, label, rect.left() + 6.0, rect.right() - 6.0);
+    }
+
+    /// The window's own title bar. OS decorations are off, so this bar moves
+    /// the window when dragged, toggles maximize on double-click, and carries
+    /// minimize / maximize / close buttons at the right like a classic skin.
+    fn draw_window_title_bar(&self, ui: &mut Ui) {
+        const BTN: f32 = 11.0;
+        const GAP: f32 = 2.0;
+        let (rect, bar) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::click_and_drag());
+        let ctx = ui.ctx().clone();
+        let maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+
+        // Buttons, right to left: close, maximize, minimize.
+        let y = rect.center().y - BTN / 2.0;
+        let mut x = rect.right() - 4.0 - BTN;
+        let mut rects = [Rect::ZERO; 3];
+        for r in rects.iter_mut() {
+            *r = Rect::from_min_size(pos2(x, y), vec2(BTN, BTN));
+            x -= BTN + GAP;
         }
-        p.galley(pos2(cx - galley.size().x / 2.0, rect.center().y - galley.size().y / 2.0), galley, pal::TITLE);
+        let [close_r, max_r, min_r] = rects;
+        paint_title_bar(ui.painter(), rect, "M3UNIT", rect.left() + 6.0, min_r.left() - 6.0);
+
+        let p = ui.painter().clone();
+        let hit = |r: Rect, name: &str| -> (Response, Color32) {
+            let resp = ui.interact(r, ui.id().with(("winbtn", name)), Sense::click());
+            bevel(&p, r, resp.is_pointer_button_down_on());
+            let c = if resp.hovered() { pal::WHITE } else { pal::TITLE };
+            (resp, c)
+        };
+
+        let (resp, c) = hit(min_r, "min");
+        let g = min_r.shrink(3.0);
+        p.line_segment([pos2(g.left(), g.bottom()), pos2(g.right(), g.bottom())], Stroke::new(1.0, c));
+        if resp.clicked() {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
+
+        let (resp, c) = hit(max_r, "max");
+        let g = max_r.shrink(3.0);
+        if maximized {
+            // two overlapping frames = "restore"
+            let a = Rect::from_min_max(g.min + vec2(2.0, 0.0), g.max - vec2(0.0, 2.0));
+            let b = Rect::from_min_max(g.min + vec2(0.0, 2.0), g.max - vec2(2.0, 0.0));
+            p.rect_stroke(a, 0.0, Stroke::new(1.0, c), StrokeKind::Inside);
+            p.rect_filled(b, 0.0, if resp.is_pointer_button_down_on() { pal::FACE } else { pal::FACE_HI });
+            p.rect_stroke(b, 0.0, Stroke::new(1.0, c), StrokeKind::Inside);
+        } else {
+            p.rect_stroke(g, 0.0, Stroke::new(1.0, c), StrokeKind::Inside);
+            p.line_segment([pos2(g.left(), g.top() + 1.0), pos2(g.right(), g.top() + 1.0)], Stroke::new(1.0, c));
+        }
+        if resp.clicked() {
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        }
+
+        let (resp, c) = hit(close_r, "close");
+        let g = close_r.shrink(3.0);
+        p.line_segment([g.left_top(), g.right_bottom()], Stroke::new(1.5, c));
+        p.line_segment([g.right_top(), g.left_bottom()], Stroke::new(1.5, c));
+        if resp.clicked() {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+
+        if bar.double_clicked() {
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(!maximized));
+        } else if bar.drag_started_by(PointerButton::Primary) {
+            ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+        }
+    }
+
+    /// Without OS decorations there is no frame to grab, so the right and
+    /// bottom edges of the window act as resize handles. The bottom edge only
+    /// counts when the playlist is showing, since otherwise the window height
+    /// is fixed to its contents.
+    fn handle_edge_resize(&self, ctx: &egui::Context) {
+        const EDGE: f32 = 5.0;
+        if ctx.input(|i| i.viewport().maximized.unwrap_or(false)) || ctx.dragged_id().is_some() {
+            return;
+        }
+        let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) else { return };
+        let rect = ctx.viewport_rect();
+        let east = pos.x >= rect.right() - EDGE;
+        let south = self.playlist_visible && pos.y >= rect.bottom() - EDGE;
+        let (dir, icon) = match (east, south) {
+            (true, true) => (ResizeDirection::SouthEast, CursorIcon::ResizeNwSe),
+            (true, false) => (ResizeDirection::East, CursorIcon::ResizeHorizontal),
+            (false, true) => (ResizeDirection::South, CursorIcon::ResizeVertical),
+            (false, false) => return,
+        };
+        ctx.set_cursor_icon(icon);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
+            ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+        }
     }
 
     fn draw_display(&mut self, ui: &mut Ui) {
@@ -962,12 +1037,19 @@ impl App {
         };
         ui.painter().text(foot.min + vec2(12.0, 9.0), Align2::LEFT_CENTER, left, FontId::monospace(9.0), pal::TITLE);
         ui.painter().text(
-            pos2(foot.max.x - 12.0, foot.min.y + 9.0),
+            pos2(foot.max.x - 16.0, foot.min.y + 9.0),
             Align2::RIGHT_CENTER,
             "Z prev  X play  C pause  V stop  B next",
             FontId::monospace(9.0),
             pal::LIGHT,
         );
+        // resize grip in the corner, the classic diagonal ridges
+        for k in 1..=3 {
+            let d = k as f32 * 3.0;
+            let (a, b) = (pos2(foot.max.x - 2.0 - d, foot.max.y - 2.0), pos2(foot.max.x - 2.0, foot.max.y - 2.0 - d));
+            ui.painter().line_segment([a, b], Stroke::new(1.0, pal::LIGHT));
+            ui.painter().line_segment([a + vec2(1.0, 0.0), b + vec2(0.0, 1.0)], Stroke::new(1.0, pal::DARK));
+        }
     }
 }
 
@@ -979,7 +1061,7 @@ impl eframe::App for App {
             .frame(egui::Frame::NONE.fill(pal::BG))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                self.draw_title_bar(ui, "M3UNIT");
+                self.draw_window_title_bar(ui);
                 self.draw_display(ui);
                 self.draw_seek_bar(ui);
                 self.draw_controls(ui);
@@ -994,6 +1076,7 @@ impl eframe::App for App {
                     self.draw_playlist(ui);
                 }
             });
+        self.handle_edge_resize(&ctx);
     }
 }
 
@@ -1338,6 +1421,25 @@ fn inset(p: &egui::Painter, r: Rect, fill: Color32) {
     p.line_segment([r.left_top(), r.left_bottom()], Stroke::new(1.0, pal::DARK));
     p.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0, pal::LIGHT));
     p.line_segment([r.right_top(), r.right_bottom()], Stroke::new(1.0, pal::LIGHT));
+}
+
+/// Hatched title bar with a centred label. The grip lines run from `x0` to
+/// `x1`, stopping either side of the text.
+fn paint_title_bar(p: &egui::Painter, rect: Rect, label: &str, x0: f32, x1: f32) {
+    p.rect_filled(rect, 0.0, pal::BG_DEEP);
+    let galley = p.layout_no_wrap(label.to_string(), FontId::monospace(10.0), pal::TITLE);
+    let text_w = galley.size().x + 16.0;
+    let cx = rect.center().x;
+    for (a, b) in [(x0, cx - text_w / 2.0), (cx + text_w / 2.0, x1)] {
+        if b > a {
+            for k in 0..3 {
+                let y = rect.top() + 4.0 + k as f32 * 3.0;
+                p.line_segment([pos2(a, y), pos2(b, y)], Stroke::new(1.0, pal::LIGHT));
+                p.line_segment([pos2(a, y + 1.0), pos2(b, y + 1.0)], Stroke::new(1.0, pal::DARK));
+            }
+        }
+    }
+    p.galley(pos2(cx - galley.size().x / 2.0, rect.center().y - galley.size().y / 2.0), galley, pal::TITLE);
 }
 
 /// Raised button face; `pressed` flips the edges.
