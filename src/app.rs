@@ -1059,7 +1059,6 @@ impl App {
         inset(ui.painter(), list, pal::LCD);
         let inner = list.shrink(2.0);
         let mut open = None;
-        let show_creator = self.search_input.trim().is_empty();
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
         child.set_clip_rect(inner);
         egui::ScrollArea::vertical()
@@ -1090,7 +1089,7 @@ impl App {
                     let right_galley = ui.painter().layout_no_wrap(right, FontId::monospace(9.0), pal::GREEN_DIM);
                     let right_w = right_galley.size().x;
                     let label_w = (width - right_w - 12.0).max(20.0);
-                    let galley = ui.painter().layout(show.line(show_creator), font.clone(), color, label_w);
+                    let galley = ui.painter().layout(show.line(), font.clone(), color, label_w);
                     let text_rect = Rect::from_min_size(r.min + vec2(4.0, 1.0), vec2(label_w, row_h));
                     ui.painter().with_clip_rect(text_rect).galley(text_rect.min, galley, color);
                     ui.painter().galley(pos2(r.max.x - 4.0 - right_w, r.min.y + 2.0), right_galley, pal::GREEN_DIM);

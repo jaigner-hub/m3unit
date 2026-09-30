@@ -35,14 +35,14 @@ impl Show {
         m3u_url(&self.identifier)
     }
 
-    /// One-line summary for a list row.
-    pub fn line(&self, show_creator: bool) -> String {
+    /// One-line summary for a list row: date, band, venue and city.
+    pub fn line(&self) -> String {
         let mut s = String::new();
         if !self.date.is_empty() {
             s.push_str(&self.date);
             s.push_str("  ");
         }
-        if show_creator && !self.creator.is_empty() {
+        if !self.creator.is_empty() {
             s.push_str(&self.creator);
             s.push_str("  -  ");
         }
@@ -170,8 +170,7 @@ mod tests {
         assert_eq!(show.date, "2026-09-26");
         assert_eq!(show.creator, "X");
         assert_eq!(show.rating, Some(4.5));
-        assert_eq!(show.line(false), "2026-09-26  The Forum, Inglewood, CA");
-        assert_eq!(show.line(true), "2026-09-26  X  -  The Forum, Inglewood, CA");
+        assert_eq!(show.line(), "2026-09-26  X  -  The Forum, Inglewood, CA");
         assert_eq!(show.m3u_url().as_str(), "https://archive.org/download/x2026/x2026_vbr.m3u");
     }
 }
