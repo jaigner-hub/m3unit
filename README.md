@@ -43,7 +43,7 @@ read-ahead HTTP buffer.
 
 Grab the latest Windows build (64-bit, no installer, no dependencies):
 
-**[m3unit-v0.1.0-windows-x86_64.zip](https://github.com/jaigner-hub/m3unit/releases/download/v0.1.0/m3unit-v0.1.0-windows-x86_64.zip)**
+**[m3unit-v0.1.1-windows-x86_64.zip](https://github.com/jaigner-hub/m3unit/releases/download/v0.1.1/m3unit-v0.1.1-windows-x86_64.zip)**
 
 Unzip and run `m3unit.exe`. Windows SmartScreen may warn about an unsigned
 executable on first launch; choose "More info" then "Run anyway". All releases

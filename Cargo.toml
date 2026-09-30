@@ -1,6 +1,6 @@
 [package]
 name = "m3unit"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A Winamp-flavored desktop player that streams M3U playlists from the internet"
 
